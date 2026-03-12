@@ -1,0 +1,10 @@
+{application, rebar3_fly, [
+    {description, "Rebar3 plugin for deploying Erlang/OTP applications to Fly.io"},
+    {vsn, "git"},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/novaframework/rebar3_fly"}]}
+]}.
