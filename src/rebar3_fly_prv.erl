@@ -5,7 +5,7 @@
 -define(PROVIDER, fly).
 -define(DEPS, []).
 
--spec init(rebar_state:t()) -> {ok, rebar_state:t()}.
+-spec init(term()) -> {ok, term()}.
 init(State) ->
     Provider = providers:create([
         {name, ?PROVIDER},
@@ -26,7 +26,7 @@ init(State) ->
     ]),
     {ok, rebar_state:add_provider(State, Provider)}.
 
--spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
+-spec do(term()) -> {ok, term()} | {error, string()}.
 do(State) ->
     {Args, _} = rebar_state:command_parsed_args(State),
     Action = proplists:get_value(action, Args),
