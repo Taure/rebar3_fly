@@ -10,7 +10,7 @@ init(State) ->
     Provider = providers:create([
         {name, ?PROVIDER},
         {module, ?MODULE},
-        {bare, true},
+        {bare, false},
         {deps, ?DEPS},
         {example, "rebar3 fly deploy"},
         {opts, [
@@ -20,7 +20,7 @@ init(State) ->
         {desc,
             "Manage Fly.io deployments for Erlang/OTP applications.\n\n"
             "Actions:\n"
-            "  init    - Create a new Fly.io app (generates fly.toml if missing)\n"
+            "  init    - Scaffold Fly.io deployment files (Dockerfile, release config, fly.toml)\n"
             "  deploy  - Build and deploy to Fly.io\n"
             "  status  - Show app status on Fly.io\n"}
     ]),
@@ -28,7 +28,6 @@ init(State) ->
 
 -spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
 do(State) ->
-    ensure_flyctl(),
     {Args, _} = rebar_state:command_parsed_args(State),
     Action = proplists:get_value(action, Args),
     AppName = get_app_name(State),
@@ -46,70 +45,163 @@ format_error(Reason) ->
 run_action("init", AppName, AppDir, State) ->
     fly_init(AppName, AppDir, State);
 run_action("deploy", _AppName, AppDir, State) ->
+    ensure_flyctl(),
     fly_deploy(AppDir, State);
 run_action("status", _AppName, _AppDir, State) ->
+    ensure_flyctl(),
     fly_status(State);
 run_action(undefined, _AppName, AppDir, State) ->
+    ensure_flyctl(),
     fly_deploy(AppDir, State);
 run_action(Other, _AppName, _AppDir, _State) ->
     rebar_api:abort("Unknown action: ~s. Use init, deploy, or status.", [Other]).
 
 %%--------------------------------------------------------------------
-%% Internal functions
+%% Init — scaffold all deployment files
 %%--------------------------------------------------------------------
 
-get_app_name(State) ->
-    [Hd | _] = rebar_state:project_apps(State),
-    binary_to_atom(rebar_app_info:name(Hd)).
-
-get_app_dir(State) ->
-    [Hd | _] = rebar_state:project_apps(State),
-    rebar_app_info:dir(Hd).
-
-ensure_flyctl() ->
-    case os:find_executable("fly") of
-        false ->
-            rebar_api:abort(
-                "flyctl not found. Install it: curl -L https://fly.io/install.sh | sh", []);
-        _Path ->
-            ok
-    end.
-
 fly_init(AppName, AppDir, State) ->
-    maybe_generate_fly_toml(AppName, AppDir),
-    rebar_api:info("Creating Fly.io app...", []),
-    Cmd = ["cd ", AppDir, " && fly launch --no-deploy --copy-config --yes"],
-    require_cmd(Cmd, "fly launch"),
-    rebar_api:info("Fly.io app created. Run 'rebar3 fly deploy' to deploy.", []),
+    NameStr = atom_to_list(AppName),
+    OtpMajor = otp_major_version(),
+    Files = [
+        {"Dockerfile", filename:join(AppDir, "Dockerfile"), generate_dockerfile(NameStr, OtpMajor)},
+        {".dockerignore", filename:join(AppDir, ".dockerignore"), generate_dockerignore()},
+        {"config/prod_sys.config", filename:join([AppDir, "config", "prod_sys.config"]),
+            generate_prod_sys_config(NameStr)},
+        {"config/vm.args", filename:join([AppDir, "config", "vm.args"]), generate_vm_args(NameStr)},
+        {"fly.toml", filename:join(AppDir, "fly.toml"), generate_fly_toml(NameStr)}
+    ],
+    Generated = lists:filtermap(
+        fun({Label, Path, Content}) ->
+            case maybe_write_file(Path, Content) of
+                {_, created} -> {true, Label};
+                {_, exists} -> false
+            end
+        end,
+        Files
+    ),
+    case Generated of
+        [] ->
+            rebar_api:info("All deployment files already exist.", []);
+        _ ->
+            rebar_api:info("Created: ~s", [string:join(Generated, ", ")])
+    end,
+    rebar_api:info("", []),
+    print_relx_snippet(NameStr),
+    print_ipv6_note(),
+    print_next_steps(),
     {ok, State}.
+
+%%--------------------------------------------------------------------
+%% Deploy
+%%--------------------------------------------------------------------
 
 fly_deploy(AppDir, State) ->
     rebar_api:info("Deploying to Fly.io...", []),
     ToolVersions = filename:join(AppDir, ".tool-versions"),
     BuildArgs = build_args_from_tool_versions(ToolVersions),
-    Cmd = ["cd ", AppDir, " && fly deploy", BuildArgs],
+    Cmd = ["cd ", AppDir, " && fly deploy --local-only", BuildArgs],
     require_cmd(Cmd, "fly deploy"),
     rebar_api:info("Deploy complete!", []),
     {ok, State}.
+
+%%--------------------------------------------------------------------
+%% Status
+%%--------------------------------------------------------------------
 
 fly_status(State) ->
     require_cmd("fly status", "fly status"),
     {ok, State}.
 
-maybe_generate_fly_toml(AppName, AppDir) ->
-    FlyToml = filename:join(AppDir, "fly.toml"),
-    case filelib:is_regular(FlyToml) of
-        true ->
-            rebar_api:info("fly.toml already exists, launching app...", []);
-        false ->
-            rebar_api:info("Generating fly.toml for ~s", [AppName]),
-            generate_fly_toml(AppName, FlyToml)
-    end.
+%%--------------------------------------------------------------------
+%% File generators
+%%--------------------------------------------------------------------
 
-generate_fly_toml(AppName, Path) ->
-    Content = [
-        "app = '", atom_to_list(AppName), "'\n",
-        "primary_region = 'ams'\n",
+generate_dockerfile(AppName, OtpMajor) ->
+    RuntimeImage = runtime_image(OtpMajor),
+    [
+        "FROM erlang:",
+        integer_to_list(OtpMajor),
+        " AS builder\n",
+        "\n",
+        "WORKDIR /app\n",
+        "\n",
+        "RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*\n",
+        "\n",
+        "COPY rebar.config rebar.lock ./\n",
+        "RUN rebar3 compile\n",
+        "\n",
+        "COPY config ./config\n",
+        "COPY src ./src\n",
+        "COPY priv ./priv\n",
+        "\n",
+        "RUN rebar3 release\n",
+        "\n",
+        "FROM ",
+        RuntimeImage,
+        "\n",
+        "\n",
+        "RUN apt-get update && \\\n",
+        "    apt-get install -y --no-install-recommends \\\n",
+        "    libssl3 libncurses6 libstdc++6 && \\\n",
+        "    rm -rf /var/lib/apt/lists/*\n",
+        "\n",
+        "WORKDIR /app\n",
+        "\n",
+        "COPY --from=builder /app/_build/default/rel/",
+        AppName,
+        " ./\n",
+        "\n",
+        "ENV PORT=8080\n",
+        "EXPOSE 8080\n",
+        "\n",
+        "CMD [\"bin/",
+        AppName,
+        "\", \"foreground\"]\n"
+    ].
+
+generate_dockerignore() ->
+    [
+        "_build\n",
+        ".git\n",
+        "erl_crash.dump\n",
+        "rebar3.crashdump\n",
+        "*.beam\n"
+    ].
+
+generate_prod_sys_config(AppName) ->
+    [
+        "[\n",
+        " {nova, [\n",
+        "         {environment, prod},\n",
+        "         {cowboy_configuration, #{\n",
+        "                                  port => 8080\n",
+        "                                 }},\n",
+        "         {bootstrap_application, ",
+        AppName,
+        "}\n",
+        "        ]}\n",
+        "].\n"
+    ].
+
+generate_vm_args(AppName) ->
+    [
+        "-name ",
+        AppName,
+        "@127.0.0.1\n",
+        "-setcookie ",
+        AppName,
+        "_cookie\n",
+        "+K true\n",
+        "+A 30\n"
+    ].
+
+generate_fly_toml(AppName) ->
+    [
+        "app = '",
+        AppName,
+        "'\n",
+        "primary_region = 'arn'\n",
         "\n",
         "[build]\n",
         "\n",
@@ -121,31 +213,111 @@ generate_fly_toml(AppName, Path) ->
         "  min_machines_running = 0\n",
         "  processes = ['app']\n",
         "\n",
-        "[checks]\n",
-        "  [checks.health]\n",
-        "    grace_period = \"10s\"\n",
-        "    interval = \"15s\"\n",
-        "    method = \"GET\"\n",
-        "    path = \"/healthz\"\n",
-        "    port = 8080\n",
-        "    timeout = \"5s\"\n",
-        "    type = \"http\"\n",
-        "\n",
-        "  [checks.ready]\n",
-        "    grace_period = \"15s\"\n",
-        "    interval = \"15s\"\n",
-        "    method = \"GET\"\n",
-        "    path = \"/readyz\"\n",
-        "    port = 8080\n",
-        "    timeout = \"5s\"\n",
-        "    type = \"http\"\n",
-        "\n",
         "[[vm]]\n",
-        "  size = 'shared-cpu-1x'\n",
-        "  memory = '512mb'\n"
-    ],
-    ok = file:write_file(Path, Content),
-    rebar_api:info("Created ~s", [Path]).
+        "  memory = '1gb'\n",
+        "  cpu_kind = 'shared'\n",
+        "  cpus = 1\n"
+    ].
+
+%%--------------------------------------------------------------------
+%% Helpers
+%%--------------------------------------------------------------------
+
+runtime_image(OtpMajor) when OtpMajor >= 28 ->
+    "debian:trixie-slim";
+runtime_image(_) ->
+    "debian:bookworm-slim".
+
+otp_major_version() ->
+    list_to_integer(erlang:system_info(otp_release)).
+
+get_app_info(State) ->
+    case rebar_state:project_apps(State) of
+        [Hd | _] ->
+            {binary_to_atom(rebar_app_info:name(Hd)), rebar_app_info:dir(Hd)};
+        [] ->
+            Dir = rebar_dir:root_dir(State),
+            case find_app_src(Dir) of
+                {ok, Name} ->
+                    {Name, Dir};
+                error ->
+                    {list_to_atom(filename:basename(Dir)), Dir}
+            end
+    end.
+
+get_app_name(State) ->
+    {Name, _} = get_app_info(State),
+    Name.
+
+get_app_dir(State) ->
+    {_, Dir} = get_app_info(State),
+    Dir.
+
+find_app_src(Dir) ->
+    SrcDir = filename:join(Dir, "src"),
+    case filelib:wildcard("*.app.src", SrcDir) of
+        [AppSrc | _] ->
+            BaseName = filename:basename(AppSrc, ".app.src"),
+            {ok, list_to_atom(BaseName)};
+        [] ->
+            error
+    end.
+
+ensure_flyctl() ->
+    case os:find_executable("fly") of
+        false ->
+            rebar_api:abort(
+                "flyctl not found. Install it: curl -L https://fly.io/install.sh | sh", []
+            );
+        _Path ->
+            ok
+    end.
+
+maybe_write_file(Path, Content) ->
+    case filelib:is_regular(Path) of
+        true ->
+            {Path, exists};
+        false ->
+            ok = filelib:ensure_dir(Path),
+            ok = file:write_file(Path, Content),
+            {Path, created}
+    end.
+
+print_relx_snippet(AppName) ->
+    rebar_api:info(
+        "Add this to your rebar.config if you don't have a relx section:\n"
+        "\n"
+        "{relx, [\n"
+        "    {release, {~s, \"0.1.0\"}, [\n"
+        "        ~s,\n"
+        "        sasl\n"
+        "    ]},\n"
+        "    {sys_config, \"./config/prod_sys.config\"},\n"
+        "    {vm_args, \"./config/vm.args\"},\n"
+        "    {mode, prod},\n"
+        "    {extended_start_script, true}\n"
+        "]}.\n",
+        [AppName, AppName]
+    ).
+
+print_ipv6_note() ->
+    rebar_api:info(
+        "NOTE: Fly.io uses IPv6 for internal networking.\n"
+        "If connecting to Fly Postgres, pass [inet6] as a socket option\n"
+        "to your database driver (e.g. pgo socket_options).\n",
+        []
+    ).
+
+print_next_steps() ->
+    rebar_api:info(
+        "Next steps:\n"
+        "  1. Add the relx config above to rebar.config\n"
+        "  2. Run: fly launch --no-deploy\n"
+        "  3. Create Postgres: fly postgres create\n"
+        "  4. Attach DB: fly postgres attach <db-name>\n"
+        "  5. Deploy: rebar3 fly deploy\n",
+        []
+    ).
 
 require_cmd(Cmd, Label) ->
     case run_cmd(Cmd) of
