@@ -63,6 +63,10 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         run: rebar3 xref
 
+      - name: ExDoc
+        if: steps.check_tag.outputs.exists == 'false'
+        run: rebar3 ex_doc
+
       - name: Extract changelog
         if: steps.check_tag.outputs.exists == 'false'
         id: changelog

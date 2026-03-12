@@ -6,6 +6,10 @@
 
 - ex_doc warnings for undefined rebar_state:t() type references
 
+### Changed
+
+- Added ex_doc step to CI and release workflows
+
 ## [0.1.0]
 
 ### Added
