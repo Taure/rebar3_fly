@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.0]
+
+### Fixed
+
+- ex_doc warnings for undefined rebar_state:t() type references
+
 ## [0.1.0]
 
 ### Added
