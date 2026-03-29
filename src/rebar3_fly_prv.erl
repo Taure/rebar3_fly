@@ -100,7 +100,7 @@ fly_deploy(AppDir, State) ->
     rebar_api:info("Deploying to Fly.io...", []),
     ToolVersions = filename:join(AppDir, ".tool-versions"),
     BuildArgs = build_args_from_tool_versions(ToolVersions),
-    Cmd = ["cd ", AppDir, " && fly deploy --local-only", BuildArgs],
+    Cmd = ["fly deploy ", AppDir, " --local-only", BuildArgs],
     require_cmd(Cmd, "fly deploy"),
     rebar_api:info("Deploy complete!", []),
     {ok, State}.
