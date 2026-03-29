@@ -102,7 +102,7 @@ fly_init(AppName, AppDir, State) ->
 
 fly_launch(AppDir, State) ->
     rebar_api:info("Launching app on Fly.io...", []),
-    Cmd = ["fly launch --no-deploy --copy-config ", AppDir, "/fly.toml"],
+    Cmd = ["fly launch --no-deploy --copy-config --path ", AppDir],
     require_cmd(Cmd, "fly launch"),
     rebar_api:info("App created! Now run: rebar3 fly deploy", []),
     {ok, State}.
