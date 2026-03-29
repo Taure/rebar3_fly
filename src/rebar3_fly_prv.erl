@@ -14,13 +14,14 @@ init(State) ->
         {deps, ?DEPS},
         {example, "rebar3 fly deploy"},
         {opts, [
-            {action, undefined, undefined, string, "Action: init, deploy, or status"}
+            {action, undefined, undefined, string, "Action: init, launch, deploy, or status"}
         ]},
         {short_desc, "Deploy Erlang/OTP application to Fly.io"},
         {desc,
             "Manage Fly.io deployments for Erlang/OTP applications.\n\n"
             "Actions:\n"
             "  init    - Scaffold Fly.io deployment files (Dockerfile, release config, fly.toml)\n"
+            "  launch  - Create the app on Fly.io (first time setup)\n"
             "  deploy  - Build and deploy to Fly.io\n"
             "  status  - Show app status on Fly.io\n"}
     ]),
@@ -44,6 +45,9 @@ format_error(Reason) ->
 
 run_action("init", AppName, AppDir, State) ->
     fly_init(AppName, AppDir, State);
+run_action("launch", _AppName, AppDir, State) ->
+    ensure_flyctl(),
+    fly_launch(AppDir, State);
 run_action("deploy", _AppName, AppDir, State) ->
     ensure_flyctl(),
     fly_deploy(AppDir, State);
@@ -54,7 +58,7 @@ run_action(undefined, _AppName, AppDir, State) ->
     ensure_flyctl(),
     fly_deploy(AppDir, State);
 run_action(Other, _AppName, _AppDir, _State) ->
-    rebar_api:abort("Unknown action: ~s. Use init, deploy, or status.", [Other]).
+    rebar_api:abort("Unknown action: ~s. Use init, launch, deploy, or status.", [Other]).
 
 %%--------------------------------------------------------------------
 %% Init — scaffold all deployment files
@@ -90,6 +94,17 @@ fly_init(AppName, AppDir, State) ->
     print_relx_snippet(NameStr),
     print_ipv6_note(),
     print_next_steps(),
+    {ok, State}.
+
+%%--------------------------------------------------------------------
+%% Launch — create app on Fly.io (first time)
+%%--------------------------------------------------------------------
+
+fly_launch(AppDir, State) ->
+    rebar_api:info("Launching app on Fly.io...", []),
+    Cmd = ["fly launch --no-deploy --copy-config ", AppDir, "/fly.toml"],
+    require_cmd(Cmd, "fly launch"),
+    rebar_api:info("App created! Now run: rebar3 fly deploy", []),
     {ok, State}.
 
 %%--------------------------------------------------------------------
@@ -312,10 +327,10 @@ print_next_steps() ->
     rebar_api:info(
         "Next steps:\n"
         "  1. Add the relx config above to rebar.config\n"
-        "  2. Run: fly launch --no-deploy\n"
-        "  3. Create Postgres: fly postgres create\n"
-        "  4. Attach DB: fly postgres attach <db-name>\n"
-        "  5. Deploy: rebar3 fly deploy\n",
+        "  2. Run: rebar3 fly launch (first time only)\n"
+        "  3. Run: rebar3 fly deploy\n"
+        "  4. (Optional) Create Postgres: fly postgres create\n"
+        "  5. (Optional) Attach DB: fly postgres attach <db-name>\n",
         []
     ).
 
